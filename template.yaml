@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  AWS lambda functions
+
+Transform:
+  - AWS::Serverless-2016-10-31
+
+Parameters:
+
+  ApiName:
+    Description: Name of the API
+    Type: String
+    Default: nss
+
+Resources:
+  DynamoDBStreamHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: 'nodejs12.x'
+      Environment:
+        Variables:
+          SNS_TOPIC_NAME: !ImportValue
+            'Fn::Sub': '${ApiName}-dynamoDB-stream-sns-topic-name'
+          SNS_TOPIC_ARN: !ImportValue
+            'Fn::Sub': '${ApiName}-dynamoDB-stream-sns-topic-arn'
+      Handler: src/lambda/streamHandler/index.processDynamoDBStream
+      FunctionCode:
+        Bucket: !ImportValue
+          'Fn::Sub': '${ApiName}-s3-bucket-name'
+        Key: 'streamHandler'
+      Events:
+        DDBEvent:
+          Type: DynamoDB
+          Properties:
+            BatchSize: 10
+            Enabled: false
+            Stream: !ImportValue
+              'Fn::Sub': '${ApiName}-dynamoDB-stream-arn'
+            StartingPosition: 'TRIM_HORIZON'
+      Role: !GetAtt StreamHandlerLambdaRole.Arn
+
+  SQSHandlerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: 'nodejs12.x'
+      Environment:
+        Variables:
+          SQS_URL: !ImportValue
+            'Fn::Sub': '${ApiName}-stream-queue-url'
+      Handler: src/lambda/sqsHandler/index.processSQSMessages
+      Code:
+        Bucket: !ImportValue
+          'Fn::Sub': '${ApiName}-s3-bucket-name'
+        Key: sqsHandler
+      Events:
+        SQSQueueEvent:
+          Type: SQS
+          Properties:
+            BatchSize: 10
+            Enabled: false
+            Queue: !ImportValue
+              'Fn::Sub': '${ApiName}-stream-queue-arn'
+      Role: !GetAtt SQSHandlerLambdaRole.Arn
+
+  StreamHandlerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: StreamHandlerLambdaRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource: !ImportValue
+                  'Fn::Sub': '${ApiName}-dynamoDB-stream-arn'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !ImportValue
+                  'Fn::Sub': '${ApiName}-dynamoDB-stream-sns-topic-arn'
+
+  SQSHandlerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: DynamoDBSNSListenerRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:GetItem
+                Resource: !ImportValue
+                  'Fn::Sub': '${ApiName}-dynamoDB-sns-listener-arn'
+        - PolicyName: AllowedSQSPermissionsRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - SQS:ReceiveMessage
+                  - SQS:DeleteMessage
+                  - SQS:GetQueueAttributes
+                Resource: !ImportValue
+                  'Fn::Sub': '${ApiName}-stream-queue-arn'
+
+Outputs:
+
+  DynamoDBStreamHandlerFunctionName:
+    Description: DynamoDB stream handler lambda function
+    Value: !GetAtt DynamoDBStreamHandlerFunction.Arn
+    Export:
+      Name: !Join [ '', [!Ref ApiName, '-stream-handler-function-arn']]
+
+  SQSHandlerFunction:
+    Description: SQS handler lambda function
+    Value: !GetAtt SQSHandlerFunction.Arn
+    Export:
+      Name: !Join [ '', [!Ref ApiName, '-sqs-handler-function-arn']]

@@ -1,0 +1,221 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  DynamoDBStreaming
+Transform:
+  - AWS::Serverless-2016-10-31
+
+Parameters:
+  ApiName:
+    Description: Name of the API
+    Type: String
+    Default: nss
+
+Resources:
+### Lambda functions ###
+  DynamoDBStreamHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: 'nodejs12.x'
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref S3StreamBucket
+          S3_BUCKET_KEY: 'DynamoDBStream'
+      CodeUri: ../lambda/streamHandler/
+      Handler: index.processDynamoDBStream
+      Events:
+        DDBEvent:
+          Type: DynamoDB
+          Properties:
+            BatchSize: 10
+            Enabled: false
+            Stream: !GetAtt DynamoDBTableStream.StreamArn
+            StartingPosition: 'TRIM_HORIZON'
+      Role: !GetAtt StreamHandlerLambdaRole.Arn
+
+  SQSHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: 'nodejs12.x'
+      Environment:
+        Variables:
+          SQS_URL: !Ref StreamQueue
+          STREAM_DYNAMODB_TABLE_NAME: !Ref DynamoDBTableStream
+          LISTENER_DYNAMODB_TABLE_NAME: !Ref DynamoDBTableStreamListener
+      CodeUri: ../lambda/sqsHandler/
+      Handler: index.processSQSMessages
+      Events:
+        SQSQueueEvent:
+          Type: SQS
+          Properties:
+            BatchSize: 10
+            Enabled: false
+            Queue: !GetAtt StreamQueue.Arn
+      Role: !GetAtt SQSHandlerLambdaRole.Arn
+
+### SQS ###
+  StreamQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: StreamQueue
+
+  S3ToSqsPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref StreamQueue
+      PolicyDocument:
+        Statement:
+          - Sid: Allow S3 publish to SQS
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt StreamQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt S3StreamBucket.Arn
+
+### S3 buckets ###
+  S3StreamBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: StreamQueue
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub '${ApiName}-stream-bucket'
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Queue: !GetAtt StreamQueue.Arn
+
+### DynamoDB tables ###
+  DynamoDBTableStream:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: 'id'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'id'
+          KeyType: 'HASH'
+      ProvisionedThroughput:
+        ReadCapacityUnits: '5'
+        WriteCapacityUnits: '5'
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      TableName: !Join ['', [!Ref ApiName, '-stream']]
+
+  DynamoDBTableStreamListener:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: 'id'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'id'
+          KeyType: 'HASH'
+      ProvisionedThroughput:
+        ReadCapacityUnits: '5'
+        WriteCapacityUnits: '5'
+      TableName: !Join ['', [!Ref ApiName, '-sns-listener']]
+
+### IAM Roles ###
+  StreamHandlerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: StreamHandlerLambdaRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource: !GetAtt DynamoDBTableStream.StreamArn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt S3StreamBucket.Arn
+                  - !Join ['/', [!GetAtt S3StreamBucket.Arn, '*']]
+
+  SQSHandlerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: DynamoDBSNSListenerRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+              - Effect: Allow
+                Action:
+                  - SQS:ReceiveMessage
+                  - SQS:DeleteMessage
+                  - SQS:GetQueueAttributes
+                Resource: !GetAtt StreamQueue.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:GetItem
+                Resource: !GetAtt DynamoDBTableStreamListener.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:GetItem
+                Resource: !GetAtt DynamoDBTableStream.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt S3StreamBucket.Arn
+                  - !Join ['/', [!GetAtt S3StreamBucket.Arn, '*']]
+
+Outputs:
+
+  DynamoDBStreamHandlerFunctionName:
+    Description: DynamoDB stream handler lambda function
+    Value: !GetAtt DynamoDBStreamHandlerFunction.Arn
+    Export:
+      Name: !Join [ '', [!Ref ApiName, '-stream-handler-function-arn']]
+
+  SQSHandlerFunction:
+    Description: SQS handler lambda function
+    Value: !GetAtt SQSHandlerFunction.Arn
+    Export:
+      Name: !Join [ '', [!Ref ApiName, '-sqs-handler-function-arn']]

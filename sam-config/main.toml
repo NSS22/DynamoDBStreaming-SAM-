@@ -1,0 +1,12 @@
+version=0.1
+
+[local.deploy.parameters]
+stack_name = "nss-local"
+template_file = "sam-templates/main.yaml"
+s3_bucket = "local-dynamodb-stream-sam-eu-west-1"
+s3_prefix = "NSS"
+region = "eu-west-1"
+no_confirm_changeset = true
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+parameter_overrides = "paramEnvironment=\"local\""
+profile = "default"

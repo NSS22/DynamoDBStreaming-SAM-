@@ -1,0 +1,17 @@
+{
+  "name": "dynamodb_streaming",
+  "version": "1.0.0",
+  "description": "DynamoDBStreaming(SAM)",
+  "repository": {
+    "type": "git",
+    "url": "NSS22"
+  },
+  "author": "NSS",
+  "license": "ISC",
+  "main": "index.js",
+  "scripts": {
+    "sam:build": "sam build --config-file sam-config/${CF_NAME}.toml --config-env $CF_ENV",
+    "sam:deploy": "sam deploy --config-file sam-config/${CF_NAME}.toml --config-env $CF_ENV",
+    "sam:local": "CF_NAME=main CF_ENV=local npm run sam:deploy"
+  }
+}
